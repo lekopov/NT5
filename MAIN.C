@@ -14,8 +14,9 @@
 #use "user.lib"
 #use "TMC222.lib"
 
-#define PRINTABLE		1
-#define PRODUCT		0
+#define PRINTABLE			1
+//#define PRINTABLE_MO		1
+//#define PRODUCT			0
 
 #define CINBUFSIZE  15
 #define COUTBUFSIZE 15
@@ -67,8 +68,8 @@
 //encoders byte select; 0 - MSB
 #define SEL				0
 //reset encoders
-#define EM_ENC_NRES	1
-#define EX_ENC_NRES	2
+//#define EM_ENC_NRES	1
+//#define EX_ENC_NRES	2
 //lamp sinchro impuls
 #define SIP				4
 
@@ -82,8 +83,8 @@
 //HV block switch
 #define BLOCK				4
 //end switch for motors
-#define EM_SW_END			5
-#define EX_SW_END			6
+//#define EM_SW_END			5
+//#define EX_SW_END			6
 //cell insirt switch
 #define CELL				7
 
@@ -225,7 +226,9 @@ const char em_beg_pos[]  = {0x0a, 0x28};
 
 //Global variables
 byte_t OUTShadow;
+byte_t executed;
 
+uint16_t num_of_steps_exec, num_of_steps;
 uint16_t ex_initial_pos, em_initial_pos;
 uint16_t ex_target_pos, em_target_pos;
 uint16_t ref_data[MAX_DATA_POINTS], main_data[MAXSIZE];
@@ -259,7 +262,7 @@ main() {
    byte_t* temp;
 
    int result;
-   uint16_t n, val, num_of_steps;
+   uint16_t n, val;
    uint16_t tx_bytes;
 
 
@@ -324,8 +327,17 @@ main() {
 #ifdef	PRINTABLE
 				printf("Command GET_STATUS.\n");
 #endif
-				tx_mssg.rsp.msgsize = 1;
-				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
+            if (isCoRunning(&Exec)){
+            	printf("Exec is running.\n");
+//Calculate persentage for Execution
+					tx_mssg.rsp.msgsize = 2;
+					executed = (byte_t)((num_of_steps_exec * 100 ) / num_of_steps);
+					tx_mssg.respond[ST_OFFSET] = (byte_t)BUSY;
+            }
+            else {
+            	tx_mssg.rsp.msgsize = 2;
+					tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
+				}
            break;
            case (byte_t)SET_PARAMS:
 #ifdef	PRINTABLE
@@ -390,9 +402,8 @@ main() {
 
                num_of_ex_stp = params.points.ex_steps;
                num_of_em_stp = params.points.em_steps;
-/*L.P. if add 1 we have more than 1024 TBD
-//one more step for ref data
-               num_of_steps = (uint16_t)num_of_ex_stp * (uint16_t)(num_of_em_stp + 1);
+/*L.P. if add 1 we have more than 1024 TBD */
+               num_of_steps = (uint16_t)num_of_ex_stp * (uint16_t)(num_of_em_stp);
 //Should be less than 1024;
 					if (num_of_steps > MAXSIZE){
 #ifdef   PRINTABLE
@@ -406,7 +417,7 @@ main() {
                	CoBegin(&Transmit);
                   CoReset(&Decode);
                }
-*/
+//*/
 #ifdef   PRINTABLE
 	            printf("Accumulation a = %d (%4x).\n", accm_num, accm_num);
 	            printf("Flags f = %d (%4x).\n", params.flags, params.flags);
@@ -465,8 +476,16 @@ main() {
 				printf("Command STOP_MEASURE.\n");
 #endif
 				CoReset(&Exec);
-            wfd Reset_m[0](FIRST);
-				wfd Reset_m[1](SECOND);
+	         ex_initial_pos = ex_target_pos  = (uint16_t)(ex_beg_pos[0] << 8);
+	         ex_initial_pos = ex_target_pos |= (uint16_t)(ex_beg_pos[1]);
+
+	         em_initial_pos = em_target_pos  = (uint16_t)(em_beg_pos[0] << 8);
+	         em_initial_pos = em_target_pos |= (uint16_t)(em_beg_pos[1]);
+
+	         goToPos(FIRST, ex_target_pos);
+	         goToPos(SECOND, em_target_pos);
+	         waitfor (isPositionSet(FIRST, ex_target_pos));
+	         waitfor (isPositionSet(SECOND, em_target_pos));
 
 				tx_mssg.rsp.msgsize = 1;
 				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
@@ -488,9 +507,13 @@ main() {
          if (rx_bytes > 0){
          	if (clientCmd == GET_DATA)
             	tx_bytes = MIN_RESPOND_SIZE + val;
+            else if (tx_mssg.rsp.msgsize == 2){
+            	tx_mssg.respond[SERVICE_BYTES] = executed;
+            	tx_bytes = MIN_RESPOND_SIZE + 1;
+            }
             else
 	            tx_bytes = MIN_RESPOND_SIZE;
-#ifdef	PRINTABLE_MO
+#ifdef	PRINTABLE
 				for (n = 0; n < tx_bytes; ++n){
             	printf("0x%2x.\n",tx_mssg.respond[n]);
             }
@@ -589,6 +612,18 @@ cofunc int Dev_Init()
    SetDAC(DAC_COMMAND, GAIN);
 	//Warmup lamp
    BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
+
+#ifdef PRODUCT
+	t1 = t2 = MS_TIMER;
+   t1 += WARM_TIME;
+   while (t2 < t1){
+	   BitWrPortE(OUT, &OUTShadow, 1, SIP);   //lamp sinhro impuls
+	   usDelay(330);
+	   BitWrPortE(OUT, &OUTShadow, 0, SIP);   //lamp sinhro impuls
+      waitfor(DelayMs(10));
+    	t2 = MS_TIMER;
+   }
+#else
 //Replace this by time
 	for (i = 0; i < 250; ++i){
 		BitWrPortE(OUT, &OUTShadow, 1, SIP);	//lamp sinhro impuls
@@ -596,18 +631,9 @@ cofunc int Dev_Init()
 		BitWrPortE(OUT, &OUTShadow, 0, SIP);	//lamp sinhro impuls
 		waitfor(DelayMs(10));
    }
-#ifdef PRODUCT
-   	t1 = t2 = MS_TIMER;
-      t1 += WARM_TIME;
-      while (t2 < t1){
-	      BitWrPortE(OUT, &OUTShadow, 1, SIP);   //lamp sinhro impuls
-	      usDelay(330);
-	      BitWrPortE(OUT, &OUTShadow, 0, SIP);   //lamp sinhro impuls
-         waitfor(DelayMs(10));
-      	t2 = MS_TIMER;
-      }
 #endif
-	   BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
+	BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
+
 	return 1;
 }
 
@@ -709,14 +735,10 @@ byte_t calcCS(byte_t* mssg, uint16_t number_of_bytes)
 uint16_t swapBytes(uint16_t src)
 {
 
-	uint16_t result, temp;
+	uint16_t result;
 
-   temp = result = 0;
-
-   temp = src >> 8;
-   result = temp;
-   temp = src << 8;
-   result |= temp;
+   result = 0;
+   result = ((src << 8) & 0xff00) | ((src >> 8) & 0x00ff);
 
 	return result;
 }
@@ -734,7 +756,10 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 #ifdef	PRINTABLE
    printf("Data measurement start.\n");
 #endif
+
+	num_of_steps_exec = 0;
    initial_pos = em_target_pos;
+
    for (i = 0; i < num_of_ex_stp; ++i){
   	   BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
    	for (k = 0; k <  num_of_em_stp; ++k){
@@ -778,8 +803,10 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 	      }
 	      else
 	         break;
+
         }
         BitWrPortI(PADR, &PADRShadow, 0, EN_LAMP);
+        num_of_steps_exec += k;
 //Return to home position
 /*
 //For parallelogram scanning
@@ -869,28 +896,24 @@ unsigned int getData(char chann)
 char isPositionSet(unsigned int MotorAddr, unsigned int position)
 {
 	char i;
-	union {
-   	char status[9];
-      struct {
-	      char addr;
-	      int actual_pos;
-	      int target_pos;
-      }par;
-	}Status;
+  	char status[8];
+
+	int actual_pos;
 
    enum {false, true};
 
-   readMotorStatus(GETFULLSTATUS2, MotorAddr, (char*)&Status.status);
+   readMotorStatus(GETFULLSTATUS2, MotorAddr, status);
 
 #ifdef   PRINTABLE_MO
 	printf ("Status 2 of TMC motor %d:\n", MotorAddr);
-	for (i = 0; i < 9; ++i){
-     	printf ("Byte %d = %2x.\n", i, Status.status[i]);
+	for (i = 0; i < 8; ++i){
+     	printf ("Byte %d = %2x.\n", i, status[i]);
    }
 #endif
 
-  if (Status.par.actual_pos == position)
+   actual_pos = ((int)status[1])<< 8 | (int)status[2];
+	if (actual_pos == position)
 	  return true;
-  else
+	else
   	  return false;
 }
