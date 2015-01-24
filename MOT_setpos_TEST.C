@@ -122,14 +122,14 @@ int read_TMC (char addr, char *buf);
 int goToPos (char mot, int pos);
 void readMotorStatus(char status, char mot, char* motStatus);
 //int ReadEncoder(char mot);
-
+char isPositionSet(unsigned int MotorAddr, unsigned int position);
 //////////////////////////////////////////////////////////////////////////////
 void main()
 {
 	char input, start, end, temp_pos[2];
     int target_pos1, target_pos2, current_pos;		//, ind, endInd;
 //    int enc_data[MAX_POINTS];
-
+	unsigned long t1, t2;
 
 	initPorts ();
 	i2c_init();
@@ -149,12 +149,12 @@ void main()
 	for (; ;){
 //*
 	    motorAddr = FIRST;
-	    readMotorStatus(GETFULLSTATUS1, motorAddr);
+	    readMotorStatus(GETFULLSTATUS1, motorAddr, n_Status);
 	    send_TMC_Command((TMC_ADDR | motorAddr), RESETPOS);
-	    readMotorStatus(GETFULLSTATUS2, motorAddr);
+	    readMotorStatus(GETFULLSTATUS2, motorAddr, n_Status);
 	    //write motor parameters
 	    send_TMC_Param ((TMC_ADDR | motorAddr), SETMOTORPARAM, &mot_param[0], sizeof(mot_param));
-	    readMotorStatus(GETFULLSTATUS1, motorAddr);
+	    readMotorStatus(GETFULLSTATUS1, motorAddr, n_Status);
 
 	    //motor to home position
 	    printf("Mot %d go to home position \n", motorAddr);
@@ -169,20 +169,20 @@ void main()
 	    input = RdPortE(IN);
 	    printf("Motor %d in home_pos (input = %x)\n", motorAddr, input);
 
-	    readMotorStatus(GETFULLSTATUS1, motorAddr);
-	    readMotorStatus(GETFULLSTATUS2, motorAddr);
+	    readMotorStatus(GETFULLSTATUS1, motorAddr, n_Status);
+	    readMotorStatus(GETFULLSTATUS2, motorAddr, n_Status);
 	    send_TMC_Command((TMC_ADDR | motorAddr), RESETPOS);
 /*
       //Reset encoder
 	    BitWrPortE(OUT, &OUTShadow, 0, EM_ENC_NRES);
 	    BitWrPortE(OUT, &OUTShadow, 1, EM_ENC_NRES);
 */
-	    readMotorStatus(GETFULLSTATUS2, motorAddr);
+	    readMotorStatus(GETFULLSTATUS2, motorAddr, n_Status);
 /*
        enc_data[0] = ReadEncoder(motorAddr);
        printf("First encoder after reset %6d \n", enc_data[0]);
 */
-	    printf("Mot %d go to End position \n", motorAddr);
+//	    printf("Mot %d go to End position \n", motorAddr);
 	    //target_pos = ((int)end_pos[2]<< 8) + end_pos[3];
 //       ind = 0;
        target_pos1 = 0;
@@ -190,12 +190,12 @@ void main()
 
 	//
 	   motorAddr = SECOND;
-	   readMotorStatus(GETFULLSTATUS1, motorAddr);
+	   readMotorStatus(GETFULLSTATUS1, motorAddr, n_Status);
 	   send_TMC_Command((TMC_ADDR | motorAddr), RESETPOS);
-	   readMotorStatus(GETFULLSTATUS2, motorAddr);
+	   readMotorStatus(GETFULLSTATUS2, motorAddr, n_Status);
 //write motor parameters
 		send_TMC_Param ((TMC_ADDR | motorAddr), SETMOTORPARAM, &mot_param[0], sizeof(mot_param));
-	   readMotorStatus(GETFULLSTATUS1, motorAddr);
+	   readMotorStatus(GETFULLSTATUS1, motorAddr, n_Status);
 //motor to home position
 	   printf("Motor %d go to home position \n", motorAddr);
 	   send_TMC_Param ((TMC_ADDR | motorAddr), SETPOSITION, &home_pos[0], sizeof(home_pos));
@@ -211,30 +211,57 @@ void main()
 	   input = RdPortE(IN);
 	   printf("Motor %d in home_pos (input = %x)\n", motorAddr, input);
 
-	   readMotorStatus(GETFULLSTATUS1, motorAddr);
-	   readMotorStatus(GETFULLSTATUS2, motorAddr);
+	   readMotorStatus(GETFULLSTATUS1, motorAddr, n_Status);
+	   readMotorStatus(GETFULLSTATUS2, motorAddr, n_Status);
 	   send_TMC_Command((TMC_ADDR | motorAddr), RESETPOS);
       target_pos2 = 0;
 
 // Go to begin position and step up to the final position.
       target_pos1  = (int)(beg_pos1[0] << 8);
       target_pos1 |= (int)(beg_pos1[1]);
+      t1 = MS_TIMER;
 	   goToPos (FIRST, target_pos1);
+      isPositionSet(FIRST, target_pos1);
+      t2 = MS_TIMER - t1;
+      printf("Time to set mot1 to pos = %d is %d ms.\n", target_pos1, t2);
 
       target_pos2  = (int)(beg_pos2[0] << 8);
       target_pos2 |= (int)(beg_pos2[1]);
       goToPos (SECOND, target_pos2);
+      isPositionSet(SECOND, target_pos2);
+
       current_pos = MAX_POSITION;
-      while (target_pos1 <= current_pos && target_pos2 <= current_pos) {
+      t1 = MS_TIMER;
+      while (target_pos1 <= current_pos) {
            target_pos1 += POS_STEP;
-           target_pos2 += POS_STEP;
 
            goToPos (FIRST, target_pos1);
-           goToPos (SECOND, target_pos2);
+           isPositionSet(FIRST, target_pos1);
 
-           printf("Target pos1 = %d, pos2 = %d \n", target_pos1, target_pos2);
-           MsDelay(500);
+//           printf("Target pos1 = %d, pos2 = %d \n", target_pos1, target_pos2);
       }
+      t2 = MS_TIMER - t1;
+      printf("Time to set mot1 to pos = %d is %d ms.\n", target_pos1, t2);
+
+      t1 = MS_TIMER;
+      while (target_pos2 <= current_pos) {
+           target_pos2 += POS_STEP;
+
+           goToPos (SECOND, target_pos2);
+           isPositionSet(SECOND, target_pos2);
+
+//           printf("Target pos1 = %d, pos2 = %d \n", target_pos1, target_pos2);
+      }
+      t2 = MS_TIMER - t1;
+      printf("Time to set mot2 to pos = %d is %d ms.\n", target_pos2, t2);
+//motors should go a little back before return to home
+		target_pos1 = target_pos1 >> 1;
+      goToPos (FIRST, target_pos1);
+      isPositionSet(FIRST, target_pos1);
+
+		target_pos2 = target_pos2 >> 1;
+      goToPos (SECOND, target_pos2);
+      isPositionSet(SECOND, target_pos2);
 	}	//end endless loop
 }
 //////////////////////////////////////////////////////////////////////////////
@@ -282,4 +309,32 @@ int ReadEncoder(char mot)
 	WrPortI(PADR, &PADRShadow, PADRShadow);
 //   printf("enc value = %6d (%x).\n" , enc.val, enc.val);
     return enc.val;
+}
+
+char isPositionSet(unsigned int MotorAddr, unsigned int position)
+{
+	union {
+   	char status[9];
+      struct {
+	      char addr;
+	      int actual_pos;
+	      int target_pos;
+      }par;
+	}Status;
+
+   enum {false, true};
+
+   readMotorStatus(GETFULLSTATUS2, MotorAddr, (char*)&Status.status);
+
+#ifdef   PRINTABLE
+	printf ("Status 2 of TMC motor %d:\n", MotorAddr);
+	for (i = 0; i < 9; ++i){
+     	printf ("Byte %d = %x.\n", byte_nr, Status.status[i]);
+   }
+#endif
+
+  if (Status.par.actual_pos == position)
+	  return true;
+  else
+  	  return false;
 }

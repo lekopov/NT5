@@ -1,0 +1,77 @@
+**********************************************************************************************************************
+                        Communication between device and pc (set of commands and messages)
+**********************************************************************************************************************
+
+Rev.: 01c
+Content:
+    1) Introduction
+    2) Message format
+    3) List of messages
+    4) List of structures
+
+
+1) Introduction:
+-----------------------------
+Client(pc) can send commands to Server (device).
+Server(device) must respond to Client(pc) with messages(status-codes) or data.
+On successful  measurement completion, server sends msgDataReady.
+Endianness: little-endian
+Byte alignment: 1
+
+
+2) Message format:
+-----------------------------
+Each message starts with three bytes \x6d\x73\x67 (ascii: "msg")
+then two bytes with message body size(start from the next byte),
+then one byte of message type,
+then message body, if present, and checksum for message longer than two bytes cs = ~(b1 ^ ... ^ bn).
+
+// Example: {m,s,g}{ size }{ 1}
+//          {m,s,g}{00}{01}{01}  ---> getStatus (client to server)
+//          {m,s,g}{00}{02}{01}{0A}  ---> statusBusy(10) (server to client; 0A: byte measProgress = 10%) 
+
+
+3) List of messages:
+-----------------------------
+Client -> Server:
+    \x01: getStatus()                   // => server replies with statusOk() or statusBusy(measProgress)
+    \x02: setMeasParams(measParams)     // => server replies with statusOk() or statusBusy(measProgress) or statusError() <=>    params_ok / busy / params_error
+    \x03: startMeasurement()            // => server replies with statusOk() or statusBusy(measProgress) or statusError() <=> meas_started / busy / params_error
+    \x04: getData()                     // => server replies with msgData(measData) or statusBusy(measProgress) or statusError() <=> data_ok / busy / data_absent
+    \x05: stopMeasurement()             // => server replies with statusOk(), interrupts measurement(if in progress) and clears the data
+
+Server -> Client:
+    \x01: statusOk()                    // command accepted => started or executed
+    \x02: statusBusy(measProgress)      // response to any command while measurement in progress (except stopMeasurement)
+    \x03: statusError()                 // incorrect command, parameter, or context
+    \x04: msgDataReady()                // measurement completed, new data available, client may request it now
+    \x05: msgData(measData)             // response on getData() command, if measData present
+
+
+4) List of structures:
+-----------------------------
+typedef struct {
+    measParams params;                  //
+    uint16 *values;                     // consequence: measRect[Ex[Em[val],ref]]]
+}
+measData;
+
+typedef struct {
+    byte gain;                          // gain, allowed values: 0 ... 255
+    byte accumulation;                  // accumulation for each point, allowed values: 8/32/64/128
+    byte flags;                         // set of bits, now in use only flagBkgrSubtr(0x01)
+	byte ex_range, em_range;            // number of logical steps for the full diapason of ex/em gratings, allowed values: 1..255
+	byte measRectCnt;                   // number of measRects, allowed values: 1..(not defined, reject/correct dynamically by number of points)
+    measRect *measRects;                // measRects[measRectCnt], each defines _own_ number of points = (1+ex_steps)*(1+1+em_steps)
+}
+measParams;
+
+typedef struct {
+    byte ex_start;                      // y-coordinate, allowed values: 0..ex_range => min..max excitation grating position
+    byte em_start;                      // x-coordinate, allowed values: 0..em_range => min..max emission grating position
+	byte ex_steps;                      // number of y-steps, allowed values: 0..ex_range-ex_start
+    byte em_steps;                      // number of x-steps, allowed values: 0..em_range-em_start
+}
+measRect;
+
+**********************************************************************************************************************

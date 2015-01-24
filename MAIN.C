@@ -230,7 +230,7 @@ void clear(byte_t* buff, uint16_t buff_size);
 void SetDAC(byte_t command, byte_t value);
 void readADC ();
 unsigned int getData(char chann);
-
+char isPositionSet(unsigned int MotorAddr, unsigned int position);
 /* Functions				*/
 byte_t calcCS(byte_t* mssg, uint16_t number_of_bytes);
 uint16_t swapBytes(uint16_t src);
@@ -479,7 +479,7 @@ main() {
             	tx_bytes = MIN_RESPOND_SIZE + val;
             else
 	            tx_bytes = MIN_RESPOND_SIZE;
-#ifdef	PRINTABLE
+#ifdef	PRINTABLE_MO
 				for (n = 0; n < tx_bytes; ++n){
             	printf("0x%2x.\n",tx_mssg.respond[n]);
             }
@@ -508,10 +508,21 @@ main() {
          goToPos(FIRST, ex_target_pos);
          goToPos(SECOND, em_target_pos);
 
+         isPositionSet(FIRST, ex_target_pos); 
+         isPositionSet(SECOND, em_target_pos);
+
 			SetDAC(DAC_COMMAND, gain);
 			wfd Data_meas(accm_num, num_of_ex_stp, ex_stp_size,
          					num_of_em_stp, em_stp_size);
 
+         ex_target_pos = ex_current_pos;
+         em_target_pos = em_current_pos;
+/*
+   		goToPos(FIRST, ex_target_pos);
+	      goToPos(SECOND, em_target_pos);
+	      isPositionSet(FIRST, ex_target_pos);
+	      isPositionSet(SECOND, em_target_pos);
+*/
          CoResume(&Exec);
 
 			tx_mssg.rsp.msgsize = 1;
@@ -560,6 +571,8 @@ cofunc int Dev_Init()
 
    goToPos(FIRST, ex_target_pos);
    goToPos(SECOND, em_target_pos);
+   isPositionSet(FIRST, ex_target_pos);
+   isPositionSet(SECOND, em_target_pos);
 
    SetDAC(DAC_COMMAND, GAIN);
 	//Warmup lamp
@@ -609,17 +622,17 @@ void SetDAC(byte_t command, byte_t value){
 cofunc int Reset_m[2](byte_t mot)
 {
 	byte_t input;
-
    byte_t motorAddr;
+   byte_t status[9];
 
    motorAddr = mot;
-	readMotorStatus(GETFULLSTATUS1, motorAddr);
+	readMotorStatus(GETFULLSTATUS1, motorAddr, status);
 	send_TMC_Command((TMC_ADDR | motorAddr), RESETPOS);
-   readMotorStatus(GETFULLSTATUS2, motorAddr);
+   readMotorStatus(GETFULLSTATUS2, motorAddr, status);
 //write motor parameters
    send_TMC_Param((TMC_ADDR | motorAddr), SETMOTORPARAM, &mot_param[0],
    						sizeof(mot_param));
-   readMotorStatus(GETFULLSTATUS1, motorAddr);
+   readMotorStatus(GETFULLSTATUS1, motorAddr, status);
 
 //motor to home position
 #ifdef	PRINTABLE
@@ -644,15 +657,15 @@ cofunc int Reset_m[2](byte_t mot)
    printf("Motor %d in home_pos (input = %x)\n", motorAddr, input);
 #endif
 
-	readMotorStatus(GETFULLSTATUS1, motorAddr);
-	readMotorStatus(GETFULLSTATUS2, motorAddr);
+	readMotorStatus(GETFULLSTATUS1, motorAddr, status);
+	readMotorStatus(GETFULLSTATUS2, motorAddr, status);
 	send_TMC_Command((TMC_ADDR | motorAddr), RESETPOS);
 /*
 //Reset encoder
 	    BitWrPortE(OUT, &OUTShadow, 0, EM_ENC_NRES);
 	    BitWrPortE(OUT, &OUTShadow, 1, EM_ENC_NRES);
 */
-   readMotorStatus(GETFULLSTATUS2, motorAddr);
+   readMotorStatus(GETFULLSTATUS2, motorAddr, status);
 
 	return 1;
 }
@@ -689,6 +702,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 {
 	byte n, i, k;
 
+   uint16_t current_pos;
    uint16_t ref_temp[MAX_DATA_POINTS];
 
    ushort32_t ref, main, background;
@@ -696,7 +710,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 #ifdef	PRINTABLE
    printf("Data measurement start.\n");
 #endif
-
+   current_pos = em_target_pos;
    for (i = 0; i < num_of_ex_stp; ++i){
   	   BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
    	for (k = 0; k <  num_of_em_stp; ++k){
@@ -735,18 +749,22 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 #endif
 	      if (em_target_pos < MAX_MOT_POSITION){
 	         goToPos(SECOND, em_target_pos);
-	         MsDelay(100);
+	         isPositionSet(SECOND, em_target_pos);
 	      }
 	      else
 	         break;
         }
         BitWrPortI(PADR, &PADRShadow, 0, EN_LAMP);
+//Return to home position
+/*
 //For parallelogram scanning
         em_target_pos = em_current_pos + em_stp_size;
         em_current_pos = em_target_pos;
+*/
 //For restangular scanning
-			em_target_pos = em_current_pos;
+        em_target_pos = current_pos;
         goToPos(SECOND, em_target_pos);
+        isPositionSet(SECOND, em_target_pos);
 
         ref = 0;
         for (k = 0; k < num_of_em_stp; ++k)
@@ -761,7 +779,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
         ex_target_pos += ex_stp_size;
         if (ex_target_pos < MAX_MOT_POSITION){
 	         goToPos(FIRST, ex_target_pos);
-	         MsDelay(100);
+				isPositionSet(FIRST, ex_target_pos);
 	      }
 	      else
 	         break;
@@ -825,25 +843,29 @@ unsigned int getData(char chann)
 
 char isPositionSet(unsigned int MotorAddr, unsigned int position)
 {
-	union Status {
+	char i;
+	union {
    	char status[9];
-      char addr;
-      int actual_pos;
-      int target_pos;
-	};
+      struct {
+	      char addr;
+	      int actual_pos;
+	      int target_pos;
+      }par;
+	}Status;
+
    enum {false, true};
 
-   readMotorStatus(GETFULLSTATUS2, MotorAddr, &Status.status);
+   readMotorStatus(GETFULLSTATUS2, MotorAddr, (char*)&Status.status);
 
-#ifdef   PRINTABLE
+#ifdef   PRINTABLE_MO
 	printf ("Status 2 of TMC motor %d:\n", MotorAddr);
 	for (i = 0; i < 9; ++i){
-     	printf ("Byte %d = %x.\n", byte_nr, Status.status[i]);
+     	printf ("Byte %d = %2x.\n", i, Status.status[i]);
    }
 #endif
 
-  if (Status.actual_pos == position)
-    return true;
+  if (Status.par.actual_pos == position)
+	  return true;
   else
-  	return false;
+  	  return false;
 }
