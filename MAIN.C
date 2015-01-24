@@ -15,6 +15,7 @@
 #use "TMC222.lib"
 
 #define PRINTABLE		1
+#define PRODUCT		0
 
 #define CINBUFSIZE  15
 #define COUTBUFSIZE 15
@@ -28,6 +29,9 @@
 // arrive and must be implemented within the user's program, as it is below.
 // Will timeout after 5 seconds if no data is read.
 #define IDLE_TMOUT 5000UL
+
+// Define time towarm up lamp 1 min
+#define WARM_TIME 60000
 
 #define BAUDRATE	115200
 
@@ -222,7 +226,7 @@ const char em_beg_pos[]  = {0x0a, 0x28};
 //Global variables
 byte_t OUTShadow;
 
-uint16_t ex_current_pos, em_current_pos;
+uint16_t ex_initial_pos, em_initial_pos;
 uint16_t ex_target_pos, em_target_pos;
 uint16_t ref_data[MAX_DATA_POINTS], main_data[MAXSIZE];
 // port init function
@@ -273,7 +277,12 @@ main() {
 #ifdef	PRINTABLE
 			printf("Device init.\n");
 #endif
+			CoPause(&Recieve);
+         CoPause(&Transmit);
+			CoPause(&Decode);
+			CoPause(&Exec);
 			wfd Dev_Init();
+         CoResume(&Recieve);
 		}
 		costate Recieve always_on{
 #ifdef	PRINTABLE
@@ -456,9 +465,11 @@ main() {
 				printf("Command STOP_MEASURE.\n");
 #endif
 				CoReset(&Exec);
+            wfd Reset_m[0](FIRST);
+				wfd Reset_m[1](SECOND);
 
-				tx_mssg.rsp.msgsize = (uint16_t)(1 << 8);
-				tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
+				tx_mssg.rsp.msgsize = 1;
+				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
             CoBegin(&Transmit);
            break;
            default:
@@ -508,15 +519,15 @@ main() {
          goToPos(FIRST, ex_target_pos);
          goToPos(SECOND, em_target_pos);
 
-         isPositionSet(FIRST, ex_target_pos); 
-         isPositionSet(SECOND, em_target_pos);
+         waitfor (isPositionSet(FIRST, ex_target_pos));
+         waitfor (isPositionSet(SECOND, em_target_pos));
 
 			SetDAC(DAC_COMMAND, gain);
 			wfd Data_meas(accm_num, num_of_ex_stp, ex_stp_size,
          					num_of_em_stp, em_stp_size);
 
-         ex_target_pos = ex_current_pos;
-         em_target_pos = em_current_pos;
+         ex_target_pos = ex_initial_pos;
+         em_target_pos = em_initial_pos;
 /*
    		goToPos(FIRST, ex_target_pos);
 	      goToPos(SECOND, em_target_pos);
@@ -548,6 +559,7 @@ void clear(char* buff, uint16_t buff_size){
 cofunc int Dev_Init()
 {
 	byte_t i;
+	ulong64_t t1, t2;
 
 	initPorts();
    //All output pins - low
@@ -560,19 +572,19 @@ cofunc int Dev_Init()
 //	waitfor(DelayMs(100));
 	wfd Reset_m[1](SECOND);
 
-   ex_current_pos = em_current_pos = 0;
+   ex_initial_pos = em_initial_pos = 0;
    ex_target_pos = em_target_pos = 0;
 
-  	ex_current_pos = ex_target_pos  = (uint16_t)(ex_beg_pos[0] << 8);
-  	ex_current_pos = ex_target_pos |= (uint16_t)(ex_beg_pos[1]);
+  	ex_initial_pos = ex_target_pos  = (uint16_t)(ex_beg_pos[0] << 8);
+  	ex_initial_pos = ex_target_pos |= (uint16_t)(ex_beg_pos[1]);
 
-  	em_current_pos = em_target_pos  = (uint16_t)(em_beg_pos[0] << 8);
-  	em_current_pos = em_target_pos |= (uint16_t)(em_beg_pos[1]);
+  	em_initial_pos = em_target_pos  = (uint16_t)(em_beg_pos[0] << 8);
+  	em_initial_pos = em_target_pos |= (uint16_t)(em_beg_pos[1]);
 
    goToPos(FIRST, ex_target_pos);
    goToPos(SECOND, em_target_pos);
-   isPositionSet(FIRST, ex_target_pos);
-   isPositionSet(SECOND, em_target_pos);
+   waitfor (isPositionSet(FIRST, ex_target_pos));
+   waitfor (isPositionSet(SECOND, em_target_pos));
 
    SetDAC(DAC_COMMAND, GAIN);
 	//Warmup lamp
@@ -584,6 +596,18 @@ cofunc int Dev_Init()
 		BitWrPortE(OUT, &OUTShadow, 0, SIP);	//lamp sinhro impuls
 		waitfor(DelayMs(10));
    }
+#ifdef PRODUCT
+   	t1 = t2 = MS_TIMER;
+      t1 += WARM_TIME;
+      while (t2 < t1){
+	      BitWrPortE(OUT, &OUTShadow, 1, SIP);   //lamp sinhro impuls
+	      usDelay(330);
+	      BitWrPortE(OUT, &OUTShadow, 0, SIP);   //lamp sinhro impuls
+         waitfor(DelayMs(10));
+      	t2 = MS_TIMER;
+      }
+#endif
+	   BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
 	return 1;
 }
 
@@ -702,7 +726,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 {
 	byte n, i, k;
 
-   uint16_t current_pos;
+   uint16_t initial_pos;
    uint16_t ref_temp[MAX_DATA_POINTS];
 
    ushort32_t ref, main, background;
@@ -710,7 +734,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 #ifdef	PRINTABLE
    printf("Data measurement start.\n");
 #endif
-   current_pos = em_target_pos;
+   initial_pos = em_target_pos;
    for (i = 0; i < num_of_ex_stp; ++i){
   	   BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
    	for (k = 0; k <  num_of_em_stp; ++k){
@@ -731,7 +755,8 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 	         ref += getData(D_REF);
 	         main += getData(D_MAIN);
 
-	         MsDelay (PERIOD);
+//	         MsDelay (PERIOD);
+				waitfor(DelayMs(PERIOD));
 	      } while (--n);
 
 	      ref_temp[k] = (uint16_t)(ref >> 3);
@@ -749,7 +774,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 #endif
 	      if (em_target_pos < MAX_MOT_POSITION){
 	         goToPos(SECOND, em_target_pos);
-	         isPositionSet(SECOND, em_target_pos);
+	         waitfor (isPositionSet(SECOND, em_target_pos));
 	      }
 	      else
 	         break;
@@ -758,13 +783,13 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 //Return to home position
 /*
 //For parallelogram scanning
-        em_target_pos = em_current_pos + em_stp_size;
-        em_current_pos = em_target_pos;
+        em_target_pos = em_initial_pos + em_stp_size;
+        em_initial_pos = em_target_pos;
 */
 //For restangular scanning
-        em_target_pos = current_pos;
+        em_target_pos = initial_pos;
         goToPos(SECOND, em_target_pos);
-        isPositionSet(SECOND, em_target_pos);
+        waitfor (isPositionSet(SECOND, em_target_pos));
 
         ref = 0;
         for (k = 0; k < num_of_em_stp; ++k)
@@ -779,7 +804,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
         ex_target_pos += ex_stp_size;
         if (ex_target_pos < MAX_MOT_POSITION){
 	         goToPos(FIRST, ex_target_pos);
-				isPositionSet(FIRST, ex_target_pos);
+				waitfor (isPositionSet(FIRST, ex_target_pos));
 	      }
 	      else
 	         break;
