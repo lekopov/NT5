@@ -14,9 +14,9 @@
 #use "user.lib"
 #use "TMC222.lib"
 
-#define PRINTABLE			1
+//#define PRINTABLE			1
 //#define PRINTABLE_MO		1
-//#define PRODUCT			0
+#define PRODUCT			0
 
 #define CINBUFSIZE  15
 #define COUTBUFSIZE 15
@@ -114,7 +114,11 @@
 #define TMC_ADDR	0xC0
 //the last bit in addres fild is write/read (RD = 1)
 #define RD_BIT		0x01
-
+//Accumulation definetios
+#define ACCM_8		8
+#define ACCM_32	32
+#define ACCM_64	64
+#define ACCM_128	128
 // All commands for TMC222
 #define	GETFULLSTATUS1		0x81	//return complete status of the chip
 #define	GETFULLSTATUS2		0xfc	//return actual, target and secure position
@@ -138,8 +142,7 @@
 
 typedef	unsigned char	byte_t;
 typedef	unsigned int	uint16_t;
-typedef	unsigned short	ushort32_t;
-typedef	unsigned long	ulong64_t;
+typedef	unsigned long	ulong32_t;
 
 enum Mot {FIRST, SECOND = 2};
 enum Command {GET_STATUS = 1, SET_PARAMS, START_MEASURE, GET_DATA, STOP_MEASURE};
@@ -265,6 +268,7 @@ main() {
    uint16_t n, val;
    uint16_t tx_bytes;
 
+   ulong32_t var_temp;
 
    strncpy(tx_mssg.rsp.head, head, sizeof(head));
 //   tx_mssg.msgsize = 1;
@@ -328,11 +332,15 @@ main() {
 				printf("Command GET_STATUS.\n");
 #endif
             if (isCoRunning(&Exec)){
+#ifdef	PRINTABLE
             	printf("Exec is running.\n");
+#endif
 //Calculate persentage for Execution
 					tx_mssg.rsp.msgsize = 2;
-					executed = (byte_t)((num_of_steps_exec * 100 ) / num_of_steps);
+               var_temp = (ulong32_t)num_of_steps_exec * 100;
+					executed = (byte_t)(var_temp / num_of_steps);
 					tx_mssg.respond[ST_OFFSET] = (byte_t)BUSY;
+               tx_mssg.respond[SERVICE_BYTES] = executed;
             }
             else {
             	tx_mssg.rsp.msgsize = 2;
@@ -352,7 +360,21 @@ main() {
                		- sizeof(params.points)) + 1], sizeof(params.points));
 
                gain = params.gain;
-               accm_num = params.accumulation;
+               if (params.accumulation != ACCM_8 && params.accumulation != ACCM_32 &&
+               	params.accumulation != ACCM_64 && params.accumulation != ACCM_128){
+            		tx_mssg.rsp.msgsize = 1;
+						tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
+
+               	clear(rx_mssg, MAX_RX_SIZE);
+               	CoBegin(&Transmit);
+                  CoReset(&Decode);
+               }
+               else {
+#ifdef   PRINTABLE
+	            	printf(" params.accumulation = %d.\n", params.accumulation);
+#endif
+               	accm_num = params.accumulation;
+               }
 
                if (params.ex_log_steps == (MAX_DATA_POINTS - 1))
                {
@@ -451,20 +473,32 @@ main() {
 				printf("Command GET_DATA.\n");
 #endif
 				temp = &tx_mssg.respond[RSP_OFFSET];
-
-				for (i = 0; i < num_of_ex_stp; ++i){
-	            for (k = 0; k < num_of_em_stp; ++k){
-	               *temp = (byte_t)(main_data[i * num_of_em_stp + k] >> 8);
+            if (num_of_ex_stp ==0 && num_of_em_stp == 0){
+					*temp = (byte_t)(main_data[0] >> 8);
+	            ++temp;
+	            *temp = (byte_t)main_data[0];
+	            ++temp;
+	            *temp = (byte_t)(ref_data[0] >> 8);
+	            ++temp;
+	            *temp = (byte_t)ref_data[0];
+	            ++temp;
+               val = 4;
+            }
+            else {
+	            for (i = 0; i < num_of_ex_stp; ++i){
+	               for (k = 0; k < num_of_em_stp; ++k){
+	                  *temp = (byte_t)(main_data[i * num_of_em_stp + k] >> 8);
+	                  ++temp;
+	                  *temp = (byte_t)main_data[i * num_of_em_stp + k];
+	                  ++temp;
+	               }
+	               *temp = (byte_t)(ref_data[i] >> 8);
 	               ++temp;
-	               *temp = (byte_t)main_data[i * num_of_em_stp + k];
+	               *temp = (byte_t)ref_data[i];
 	               ++temp;
 	            }
-               *temp = (byte_t)(ref_data[i] >> 8);
-               ++temp;
-               *temp = (byte_t)ref_data[i];
-               ++temp;
+	            val = (uint16_t)(num_of_ex_stp) * (uint16_t)(num_of_em_stp + 1);
             }
-            val = (uint16_t)(num_of_ex_stp) * (uint16_t)(num_of_em_stp + 1);
 //Add one byte to CS
 				tx_mssg.rsp.msgsize = val + 1;
 				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
@@ -506,14 +540,13 @@ main() {
 #endif
          if (rx_bytes > 0){
          	if (clientCmd == GET_DATA)
-            	tx_bytes = MIN_RESPOND_SIZE + val;
+            	tx_bytes = MIN_RESPOND_SIZE + val + 1;
             else if (tx_mssg.rsp.msgsize == 2){
-            	tx_mssg.respond[SERVICE_BYTES] = executed;
             	tx_bytes = MIN_RESPOND_SIZE + 1;
             }
             else
 	            tx_bytes = MIN_RESPOND_SIZE;
-#ifdef	PRINTABLE
+#ifdef	PRINTABLE_MO
 				for (n = 0; n < tx_bytes; ++n){
             	printf("0x%2x.\n",tx_mssg.respond[n]);
             }
@@ -582,7 +615,7 @@ void clear(char* buff, uint16_t buff_size){
 cofunc int Dev_Init()
 {
 	byte_t i;
-	ulong64_t t1, t2;
+	ulong32_t t1, t2;
 
 	initPorts();
    //All output pins - low
@@ -715,7 +748,7 @@ cofunc int Reset_m[2](byte_t mot)
 	    BitWrPortE(OUT, &OUTShadow, 0, EM_ENC_NRES);
 	    BitWrPortE(OUT, &OUTShadow, 1, EM_ENC_NRES);
 */
-   readMotorStatus(GETFULLSTATUS2, motorAddr, status);
+//   readMotorStatus(GETFULLSTATUS2, motorAddr, status);
 
 	return 1;
 }
@@ -751,7 +784,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
    uint16_t initial_pos;
    uint16_t ref_temp[MAX_DATA_POINTS];
 
-   ushort32_t ref, main, background;
+   ulong32_t ref, main, background;
 
 #ifdef	PRINTABLE
    printf("Data measurement start.\n");
@@ -760,82 +793,143 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 	num_of_steps_exec = 0;
    initial_pos = em_target_pos;
 
-   for (i = 0; i < num_of_ex_stp; ++i){
-  	   BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
-   	for (k = 0; k <  num_of_em_stp; ++k){
-	      n = accumulation;
+   if (num_of_ex_stp ==0 && num_of_em_stp == 0){
+//Measurement for one point
+		n = accumulation;
 
-	      do {
-	         if (params.flags)
-	         {
-	            readADC();
-	            background += getData(D_MAIN);
-	         }
+		do {
+			if (params.flags){
+				readADC();
+				background += getData(D_MAIN);
+			}
 //Flash lamp sinhro impuls
-	         BitWrPortE(OUT, &OUTShadow, 1, SIP);
-	         usDelay(330);
-	         readADC();
-	         BitWrPortE(OUT, &OUTShadow, 0, SIP);
+			BitWrPortE(OUT, &OUTShadow, 1, SIP);
+			usDelay(330);
+			readADC();
+			BitWrPortE(OUT, &OUTShadow, 0, SIP);
 
-	         ref += getData(D_REF);
-	         main += getData(D_MAIN);
+			ref += getData(D_REF);
+			main += getData(D_MAIN);
 
-//	         MsDelay (PERIOD);
-				waitfor(DelayMs(PERIOD));
-	      } while (--n);
+			waitfor(DelayMs(PERIOD));
+		} while (--n);
 
-	      ref_temp[k] = (uint16_t)(ref >> 3);
+		if (params.flags){
+			main -= background;
+		}
 
-	      if (params.flags){
-	         main -= background;
-	      }
-	      main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 3);
+      switch (accumulation)
+      {
+        case ACCM_8:
+        		ref_data[0] = (uint16_t)(ref >> 3);
+            main_data[0] = (uint16_t)(main >> 3);
+        break;
+        case ACCM_32:
+        		ref_data[0] = (uint16_t)(ref >> 5);
+            main_data[0] = (uint16_t)(main >> 5);
+        break;
+        case ACCM_64:
+        		ref_data[0] = (uint16_t)(ref >> 6);
+            main_data[0] = (uint16_t)(main >> 6);
+        break;
+        case ACCM_128:
+        		ref_data[0] = (uint16_t)(ref >> 7);
+            main_data[0] = (uint16_t)(main >> 7);
+        default: ;
+      }
+	}
+	else{
+		for (i = 0; i < num_of_ex_stp; ++i){
+			BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
+			for (k = 0; k <  num_of_em_stp; ++k){
+				n = accumulation;
 
-	      em_target_pos += em_stp_size;
-#ifdef   PRINTABLE
-	      printf("Data for emission %d position\n", em_target_pos);
-	      printf("Ref data %d = %d \t main data %d = %d.\n", k, ref_temp[k], k,
-         		main_data[i * num_of_em_stp + k]);
-#endif
-	      if (em_target_pos < MAX_MOT_POSITION){
-	         goToPos(SECOND, em_target_pos);
-	         waitfor (isPositionSet(SECOND, em_target_pos));
-	      }
-	      else
-	         break;
+				do {
+					if (params.flags){
+						readADC();
+						background += getData(D_MAIN);
+					}
+	//Flash lamp sinhro impuls
+					BitWrPortE(OUT, &OUTShadow, 1, SIP);
+					usDelay(330);
+					readADC();
+					BitWrPortE(OUT, &OUTShadow, 0, SIP);
 
-        }
-        BitWrPortI(PADR, &PADRShadow, 0, EN_LAMP);
-        num_of_steps_exec += k;
-//Return to home position
-/*
-//For parallelogram scanning
-        em_target_pos = em_initial_pos + em_stp_size;
-        em_initial_pos = em_target_pos;
-*/
-//For restangular scanning
-        em_target_pos = initial_pos;
-        goToPos(SECOND, em_target_pos);
-        waitfor (isPositionSet(SECOND, em_target_pos));
+					ref += getData(D_REF);
+					main += getData(D_MAIN);
 
-        ref = 0;
-        for (k = 0; k < num_of_em_stp; ++k)
-        {
-        		ref += ref_temp[k];
-           	ref_data[i] = ref / num_of_em_stp;
-        }
-#ifdef   PRINTABLE
-	      printf("Data for excitation %d position\t", ex_target_pos);
-	      printf("Ref data %d = %d.\n", i, ref_data[i]);
-#endif
-        ex_target_pos += ex_stp_size;
-        if (ex_target_pos < MAX_MOT_POSITION){
-	         goToPos(FIRST, ex_target_pos);
+					waitfor(DelayMs(PERIOD));
+				} while (--n);
+
+				if (params.flags){
+					main -= background;
+				}
+
+	         switch (accumulation)
+	         {
+	           case ACCM_8:
+	               ref_temp[k] = (uint16_t)(ref >> 3);
+                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 3);
+	           break;
+	           case ACCM_32:
+	               ref_temp[k] = (uint16_t)(ref >> 5);
+                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 5);
+	           break;
+	           case ACCM_64:
+	               ref_temp[k] = (uint16_t)(ref >> 6);
+                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 6);
+	           break;
+	           case ACCM_128:
+	               ref_temp[k] = (uint16_t)(ref >> 7);
+                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 7);
+	           default: ;
+	         }
+
+				em_target_pos += em_stp_size;
+	#ifdef   PRINTABLE_MO
+				printf("Data for emission %d position\n", em_target_pos);
+				printf("Ref data %d = %d \t main data %d = %d.\n", k, ref_temp[k], k,
+						main_data[i * num_of_em_stp + k]);
+	#endif
+				if (em_target_pos < MAX_MOT_POSITION){
+					goToPos(SECOND, em_target_pos);
+					waitfor (isPositionSet(SECOND, em_target_pos));
+				}
+				else
+					break;
+
+			}
+				BitWrPortI(PADR, &PADRShadow, 0, EN_LAMP);
+				num_of_steps_exec += k;
+	//Return to home position
+	/*
+	//For parallelogram scanning
+			  em_target_pos = em_initial_pos + em_stp_size;
+			  em_initial_pos = em_target_pos;
+	*/
+	//For restangular scanning
+			em_target_pos = initial_pos;
+			goToPos(SECOND, em_target_pos);
+			waitfor (isPositionSet(SECOND, em_target_pos));
+
+			ref = 0;
+			for (k = 0; k < num_of_em_stp; ++k){
+					ref += ref_temp[k];
+					ref_data[i] = (uint16_t)(ref / num_of_em_stp);
+				}
+	#ifdef   PRINTABLE
+			printf("Data for excitation %d position\t", ex_target_pos);
+			printf("Ref data %d = %u (%4x).\n", i, ref_data[i], ref_data[i]);
+	#endif
+			ex_target_pos += ex_stp_size;
+			if (ex_target_pos < MAX_MOT_POSITION){
+				goToPos(FIRST, ex_target_pos);
 				waitfor (isPositionSet(FIRST, ex_target_pos));
-	      }
-	      else
-	         break;
-   }
+			}
+			else
+				break;
+		}
+	}
 	return 1;
 }
 
@@ -917,3 +1011,4 @@ char isPositionSet(unsigned int MotorAddr, unsigned int position)
 	else
   	  return false;
 }
+
