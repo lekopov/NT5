@@ -18,8 +18,8 @@
 //#define PRINTABLE_MO		1
 #define PRODUCT			0
 
-#define CINBUFSIZE  15
-#define COUTBUFSIZE 15
+#define CINBUFSIZE  1023
+#define COUTBUFSIZE 255
 
 // This timeout period determines when an active input data stream is considered
 // to have ended and is implemented within serXread. Will discontinue collecting
@@ -56,7 +56,8 @@
 #define i2cRetries 100
 #use I2C.LIB
 
-#define	MAXSIZE	1024
+#define	MAXSIZE		1024
+#define 	MAXPOINTS	16384
 //External port address definition
 // for PE4
 #define OUT			0x8000
@@ -94,17 +95,17 @@
 #define DAC_COMMAND 0x09
 
 //ADS8321
-#define SERV_BIT 6
+#define SERV_BIT 			6
 #define ADC_RES			16          //bit
 
 #define PERIOD				9			//ms, 19ms = 47.17Hz, 9ms = 95.54Hz
 
-#define MIN_RESPOND_SIZE	6
-//16 bytes for message and null byte
-#define MAX_RX_SIZE			17
-#define HEAD_OFFSET			3
+#define MIN_RESPOND_SIZE	4
+
+#define MAX_RX_SIZE			1024
+//#define HEAD_OFFSET			3
 #define ST_OFFSET				5
-#define CMD_OFFSET			5
+#define CMD_OFFSET			3
 #define RSP_OFFSET			6
 #define SERVICE_BYTES		6
 
@@ -148,21 +149,8 @@ enum Mot {FIRST, SECOND = 2};
 enum Command {GET_STATUS = 1, SET_PARAMS, START_MEASURE, GET_DATA, STOP_MEASURE};
 enum Status {OK = 1, BUSY, ERROR, DATA_READY, DATA};
 
-//typedef struct {
 const	byte_t head[3] = {'m', 's', 'g'};
-//}msgHead_t;
-/*
-typedef struct {
-// Ex/Em start point for start measurement, in logical steps
-	byte_t ex_start_p;
-   byte_t em_start_p;
-// number of excitation/emission steps
-	byte_t ex_steps;
-	byte_t em_steps;
-}points_t;
 
-points_t points;
-*/
 typedef struct {
 // gain, set PMT HV
 	byte_t gain;
@@ -174,9 +162,9 @@ typedef struct {
 // values: 1..255. Defines the resolution for Ex/Em
 	byte_t ex_log_steps;
    byte_t em_log_steps;
-// number of measurement points
-// allowed values: 1..(not defined, reject/correct dynamically by number of points)
-	byte_t nmb_of_points;
+// number of measurement regionss
+// allowed values: 1..(not defined, reject/correct dynamically by number of regionss)
+	byte_t nmb_of_regions;
    struct{
 // Ex/Em start point for start measurement, in logical steps
 	   byte_t ex_start_p;
@@ -184,15 +172,22 @@ typedef struct {
 // number of excitation/emission steps
 	   byte_t ex_steps;
 	   byte_t em_steps;
-   }points;
+   }points[CHAR_MAX];
 }measParams_t;
 
 measParams_t params;
 
 typedef struct {
 	measParams_t *meas_param;					//
-	uint16_t *values;						// values[params.nmb_of_points]
+	uint16_t *values;						// values[params.nmb_of_regions]
 }measData_t;
+
+typedef struct {
+	   byte_t num_of_ex_stp;
+     	byte_t num_of_em_stp;
+     	byte_t ex_stp_size;
+	   byte_t em_stp_size;
+}pointsPrm_t;
 
 byte_t rx_mssg[MAX_RX_SIZE];
 
@@ -204,8 +199,6 @@ union {
       uint16_t msgsize;
    }rsp;
 }tx_mssg;
-
-
 
 byte_t dataAD[ADC_RES];
 
@@ -247,8 +240,7 @@ uint16_t swapBytes(uint16_t src);
 
 cofunc int Dev_Init();
 cofunc int Reset_m[2](byte_t mot);
-cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_size,
-							byte_t num_of_em_stp, byte_t em_stp_size);
+cofunc int Data_meas(byte_t accumulation, pointsPrm_t* prm);
 
 CoData Recieve, Transmit, Decode, Exec;
 /******************************************************************************/
@@ -258,24 +250,25 @@ main() {
 
    byte_t i, k, clientCmd, rx_bytes;
    byte_t csumm;
-//exitation and emission steps size in step motor's microsteps
-   byte_t ex_stp_size, em_stp_size;
-   byte_t num_of_ex_stp, num_of_em_stp;
-	byte_t gain, accm_num;
+//	byte_t gain, accm_num;
    byte_t* temp;
 
    int result;
    uint16_t n, val;
    uint16_t tx_bytes;
+   uint16_t summ_of_ex_stp, summ_of_em_stp;
 
    ulong32_t var_temp;
+
+   //exitation and emission steps size in step motor's microsteps
+   pointsPrm_t rg_measPar;
 
    strncpy(tx_mssg.rsp.head, head, sizeof(head));
 //   tx_mssg.msgsize = 1;
 //   tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
 
    clear(rx_mssg, MAX_RX_SIZE);
-   clear((byte_t*)&main_data, (MAXSIZE << 1));
+   clear((byte_t*)&main_data, (MAXPOINTS << 1));
 	clear((byte_t*)&ref_data, (MAX_DATA_POINTS << 1));
 
 	for (; ;)
@@ -359,7 +352,7 @@ main() {
 					memcpy((byte_t*)&params.points, &rx_mssg[CMD_OFFSET + (sizeof(params)
                		- sizeof(params.points)) + 1], sizeof(params.points));
 
-               gain = params.gain;
+//               gain = params.gain;
                if (params.accumulation != ACCM_8 && params.accumulation != ACCM_32 &&
                	params.accumulation != ACCM_64 && params.accumulation != ACCM_128){
             		tx_mssg.rsp.msgsize = 1;
@@ -373,19 +366,20 @@ main() {
 #ifdef   PRINTABLE
 	            	printf(" params.accumulation = %d.\n", params.accumulation);
 #endif
-               	accm_num = params.accumulation;
+//               	accm_num = params.accumulation;
+						;
                }
 
                if (params.ex_log_steps == (MAX_DATA_POINTS - 1))
                {
-               	ex_stp_size = EX_MIN_STEP_SIZE;
+               	rg_measPar.ex_stp_size = EX_MIN_STEP_SIZE;
                }
                else if (params.ex_log_steps != 0 &&
                			params.ex_log_steps < MAX_DATA_POINTS){
-               	ex_stp_size = MAX_MOT_POSITION / params.ex_log_steps;
+               	rg_measPar.ex_stp_size = MAX_MOT_POSITION / params.ex_log_steps;
                }
                else if (params.ex_log_steps == 0){
-               	ex_stp_size = 0;
+               	rg_measPar.ex_stp_size = 0;
                }
                else {
 #ifdef   PRINTABLE
@@ -401,14 +395,14 @@ main() {
 
                if (params.em_log_steps == (MAX_DATA_POINTS - 1))
                {
-               	em_stp_size = EM_MIN_STEP_SIZE;
+               	rg_measPar.em_stp_size = EM_MIN_STEP_SIZE;
                }
                else if (params.em_log_steps != 0 &&
                			params.em_log_steps < MAX_DATA_POINTS){
-               	em_stp_size = MAX_MOT_POSITION / params.em_log_steps;
+               	rg_measPar.em_stp_size = MAX_MOT_POSITION / params.em_log_steps;
                }
                else if (params.em_log_steps == 0){
-               	em_stp_size = 0;
+               	rg_measPar.em_stp_size = 0;
                }
                else {
 #ifdef   PRINTABLE
@@ -421,13 +415,14 @@ main() {
                	CoBegin(&Transmit);
                   CoReset(&Decode);
 					}
-
-               num_of_ex_stp = params.points.ex_steps;
-               num_of_em_stp = params.points.em_steps;
+               for (k = 0; k < params.nmb_of_regions; ++k){
+               	summ_of_ex_stp += params.points[k].ex_steps;
+               	summ_of_em_stp += params.points[k].em_steps;
+               }
 /*L.P. if add 1 we have more than 1024 TBD */
-               num_of_steps = (uint16_t)num_of_ex_stp * (uint16_t)(num_of_em_stp);
+               num_of_steps = summ_of_ex_stp * summ_of_em_stp;
 //Should be less than 1024;
-					if (num_of_steps > MAXSIZE){
+					if (num_of_steps > MAXPOINTS){
 #ifdef   PRINTABLE
 	            	printf("Number of steps a = %d (%4x) more than MAXSIZE.\n",
                   		num_of_steps, num_of_steps);
@@ -441,12 +436,15 @@ main() {
                }
 //*/
 #ifdef   PRINTABLE
-	            printf("Accumulation a = %d (%4x).\n", accm_num, accm_num);
 	            printf("Flags f = %d (%4x).\n", params.flags, params.flags);
-	            printf("Number Ex of points n = %d (%4x).\n", num_of_ex_stp, num_of_ex_stp);
-               printf("Number Em of points n = %d (%4x).\n", num_of_em_stp, num_of_em_stp);
-					printf("Step size for Ex n = %d (%4x).\n", ex_stp_size, ex_stp_size);
-               printf("Step size for Em n = %d (%4x).\n", em_stp_size, em_stp_size);
+	            printf("Number of Ex points n = %d (%4x).\n", params.ex_log_steps,
+               			params.ex_log_steps);
+               printf("Number of Em points n = %d (%4x).\n", params.em_log_steps,
+               			params.em_log_steps);
+					printf("Step size for Ex n = %d (%4x).\n", rg_measPar.ex_stp_size,
+               			rg_measPar.ex_stp_size);
+               printf("Step size for Em n = %d (%4x).\n", rg_measPar.em_stp_size,
+               			rg_measPar.em_stp_size);
 #endif
 	            tx_mssg.rsp.msgsize = 1;
 	            tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
@@ -473,7 +471,7 @@ main() {
 				printf("Command GET_DATA.\n");
 #endif
 				temp = &tx_mssg.respond[RSP_OFFSET];
-            if (num_of_ex_stp ==0 && num_of_em_stp == 0){
+            if (rg_measPar.num_of_ex_stp ==0 && rg_measPar.num_of_em_stp == 0){
 					*temp = (byte_t)(main_data[0] >> 8);
 	            ++temp;
 	            *temp = (byte_t)main_data[0];
@@ -485,11 +483,11 @@ main() {
                val = 4;
             }
             else {
-	            for (i = 0; i < num_of_ex_stp; ++i){
-	               for (k = 0; k < num_of_em_stp; ++k){
-	                  *temp = (byte_t)(main_data[i * num_of_em_stp + k] >> 8);
+	            for (i = 0; i < rg_measPar.num_of_ex_stp; ++i){
+	               for (k = 0; k < rg_measPar.num_of_em_stp; ++k){
+	                  *temp = (byte_t)(main_data[i * rg_measPar.num_of_em_stp + k] >> 8);
 	                  ++temp;
-	                  *temp = (byte_t)main_data[i * num_of_em_stp + k];
+	                  *temp = (byte_t)main_data[i * rg_measPar.num_of_em_stp + k];
 	                  ++temp;
 	               }
 	               *temp = (byte_t)(ref_data[i] >> 8);
@@ -497,7 +495,7 @@ main() {
 	               *temp = (byte_t)ref_data[i];
 	               ++temp;
 	            }
-	            val = (uint16_t)(num_of_ex_stp) * (uint16_t)(num_of_em_stp + 1);
+	            val = (uint16_t)(rg_measPar.num_of_ex_stp) * (uint16_t)(rg_measPar.num_of_em_stp + 1);
             }
 //Add one byte to CS
 				tx_mssg.rsp.msgsize = val + 1;
@@ -569,27 +567,26 @@ main() {
 
   		   CoBegin(&Transmit);
 // Main execution programm
-			ex_target_pos += (params.points.ex_start_p * ex_stp_size);
-         em_target_pos += (params.points.em_start_p * em_stp_size);
+         for (k = 0; k < params.nmb_of_regions; ++k){
+	         ex_target_pos += (params.points[k].ex_start_p * rg_measPar.ex_stp_size);
+	         em_target_pos += (params.points[k].em_start_p * rg_measPar.em_stp_size);
 
-         goToPos(FIRST, ex_target_pos);
-         goToPos(SECOND, em_target_pos);
+	         goToPos(FIRST, ex_target_pos);
+	         goToPos(SECOND, em_target_pos);
 
-         waitfor (isPositionSet(FIRST, ex_target_pos));
-         waitfor (isPositionSet(SECOND, em_target_pos));
+            rg_measPar.num_of_ex_stp = params.points[k].ex_steps;
+            rg_measPar.num_of_em_stp = params.points[k].em_steps;
 
-			SetDAC(DAC_COMMAND, gain);
-			wfd Data_meas(accm_num, num_of_ex_stp, ex_stp_size,
-         					num_of_em_stp, em_stp_size);
+	         waitfor (isPositionSet(FIRST, ex_target_pos));
+	         waitfor (isPositionSet(SECOND, em_target_pos));
 
-         ex_target_pos = ex_initial_pos;
-         em_target_pos = em_initial_pos;
-/*
-   		goToPos(FIRST, ex_target_pos);
-	      goToPos(SECOND, em_target_pos);
-	      isPositionSet(FIRST, ex_target_pos);
-	      isPositionSet(SECOND, em_target_pos);
-*/
+	         SetDAC(DAC_COMMAND, params.gain);
+	         wfd Data_meas(params.accumulation, &rg_measPar);
+
+	         ex_target_pos = ex_initial_pos;
+	         em_target_pos = em_initial_pos;
+         }
+
          CoResume(&Exec);
 
 			tx_mssg.rsp.msgsize = 1;
@@ -776,8 +773,7 @@ uint16_t swapBytes(uint16_t src)
 	return result;
 }
 
-cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_size,
-							byte_t num_of_em_stp, byte_t em_stp_size)
+cofunc int Data_meas(byte_t accumulation, pointsPrm_t* prm)
 {
 	byte n, i, k;
 
@@ -793,7 +789,7 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 	num_of_steps_exec = 0;
    initial_pos = em_target_pos;
 
-   if (num_of_ex_stp ==0 && num_of_em_stp == 0){
+   if (prm->num_of_ex_stp ==0 && prm->num_of_em_stp == 0){
 //Measurement for one point
 		n = accumulation;
 
@@ -839,9 +835,9 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
       }
 	}
 	else{
-		for (i = 0; i < num_of_ex_stp; ++i){
+		for (i = 0; i < prm->num_of_ex_stp; ++i){
 			BitWrPortI(PADR, &PADRShadow, 1, EN_LAMP);
-			for (k = 0; k <  num_of_em_stp; ++k){
+			for (k = 0; k <  prm->num_of_em_stp; ++k){
 				n = accumulation;
 
 				do {
@@ -869,27 +865,27 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 	         {
 	           case ACCM_8:
 	               ref_temp[k] = (uint16_t)(ref >> 3);
-                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 3);
+                  main_data[i * prm->num_of_em_stp + k] = (uint16_t)(main >> 3);
 	           break;
 	           case ACCM_32:
 	               ref_temp[k] = (uint16_t)(ref >> 5);
-                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 5);
+                  main_data[i * prm->num_of_em_stp + k] = (uint16_t)(main >> 5);
 	           break;
 	           case ACCM_64:
 	               ref_temp[k] = (uint16_t)(ref >> 6);
-                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 6);
+                  main_data[i * prm->num_of_em_stp + k] = (uint16_t)(main >> 6);
 	           break;
 	           case ACCM_128:
 	               ref_temp[k] = (uint16_t)(ref >> 7);
-                  main_data[i * num_of_em_stp + k] = (uint16_t)(main >> 7);
+                  main_data[i * prm->num_of_em_stp + k] = (uint16_t)(main >> 7);
 	           default: ;
 	         }
 
-				em_target_pos += em_stp_size;
+				em_target_pos += prm->em_stp_size;
 	#ifdef   PRINTABLE_MO
 				printf("Data for emission %d position\n", em_target_pos);
 				printf("Ref data %d = %d \t main data %d = %d.\n", k, ref_temp[k], k,
-						main_data[i * num_of_em_stp + k]);
+						main_data[i * prm->num_of_em_stp + k]);
 	#endif
 				if (em_target_pos < MAX_MOT_POSITION){
 					goToPos(SECOND, em_target_pos);
@@ -913,15 +909,15 @@ cofunc int Data_meas(byte_t accumulation, byte_t num_of_ex_stp, byte_t ex_stp_si
 			waitfor (isPositionSet(SECOND, em_target_pos));
 
 			ref = 0;
-			for (k = 0; k < num_of_em_stp; ++k){
+			for (k = 0; k < prm->num_of_em_stp; ++k){
 					ref += ref_temp[k];
-					ref_data[i] = (uint16_t)(ref / num_of_em_stp);
+					ref_data[i] = (uint16_t)(ref / prm->num_of_em_stp);
 				}
 	#ifdef   PRINTABLE
 			printf("Data for excitation %d position\t", ex_target_pos);
 			printf("Ref data %d = %u (%4x).\n", i, ref_data[i], ref_data[i]);
 	#endif
-			ex_target_pos += ex_stp_size;
+			ex_target_pos += prm->ex_stp_size;
 			if (ex_target_pos < MAX_MOT_POSITION){
 				goToPos(FIRST, ex_target_pos);
 				waitfor (isPositionSet(FIRST, ex_target_pos));
