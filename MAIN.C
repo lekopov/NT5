@@ -14,17 +14,17 @@
 #use "user.lib"
 #use "TMC222.lib"
 
-//#define PRINTABLE			1
+#define PRINTABLE			1
 //#define PRINTABLE_MO		1
-#define PRODUCT			0
+//#define PRODUCT			0
 
 #define CINBUFSIZE  1023
 #define COUTBUFSIZE 255
 
 // This timeout period determines when an active input data stream is considered
 // to have ended and is implemented within serXread. Will discontinue collecting
-// data 3 seconds after receiving any character or when maxSize are read.
-#define MSSG_TMOUT 3000UL
+// data 0.5 seconds after receiving any character or when maxSize are read.
+#define MSSG_TMOUT 500UL
 
 // This timeout period determines when to give up waiting for any data to
 // arrive and must be implemented within the user's program, as it is below.
@@ -56,8 +56,13 @@
 #define i2cRetries 100
 #use I2C.LIB
 
-#define	MAXSIZE		1024
-#define 	MAXPOINTS	16384
+#define MAXSIZE				1024
+#define MAX_RX_SIZE			1024
+#define MAXPOINTS				16384
+#define MAX_DATA_POINTS		256
+#define MAX_MOT_POSITION	30000
+//head size + status + body size(alwas zero)
+#define MIN_RESPOND_SIZE	6
 //External port address definition
 // for PE4
 #define OUT			0x8000
@@ -100,17 +105,14 @@
 
 #define PERIOD				9			//ms, 19ms = 47.17Hz, 9ms = 95.54Hz
 
-#define MIN_RESPOND_SIZE	4
-
-#define MAX_RX_SIZE			1024
-//#define HEAD_OFFSET			3
-#define ST_OFFSET				5
+#define BODY_OFFSET			6
+#define ST_OFFSET				3
 #define CMD_OFFSET			3
-#define RSP_OFFSET			6
 #define SERVICE_BYTES		6
-
-#define  MAX_DATA_POINTS	256
-#define	MAX_MOT_POSITION	30000
+//global flags defenetion
+#define FLG_NO_PARMS			0x01
+#define FLG_NO_DATA			0x02
+//#define FLG_DATA_RDY			0x04
 // Motots control
 #define TMC_ADDR	0xC0
 //the last bit in addres fild is write/read (RD = 1)
@@ -148,6 +150,7 @@ typedef	unsigned long	ulong32_t;
 enum Mot {FIRST, SECOND = 2};
 enum Command {GET_STATUS = 1, SET_PARAMS, START_MEASURE, GET_DATA, STOP_MEASURE};
 enum Status {OK = 1, BUSY, ERROR, DATA_READY, DATA};
+enum ErrorCode {CS_ERR = 1, CMD_ERR, PRM_ERR, CTX_ERR};
 
 const	byte_t head[3] = {'m', 's', 'g'};
 
@@ -196,7 +199,9 @@ union {
    struct
    {
    	byte_t head[3];
+      byte_t stt;
       uint16_t msgsize;
+      byte_t ercode;
    }rsp;
 }tx_mssg;
 
@@ -223,6 +228,7 @@ const char em_beg_pos[]  = {0x0a, 0x28};
 //Global variables
 byte_t OUTShadow;
 byte_t executed;
+byte_t gFlags;
 
 uint16_t num_of_steps_exec, num_of_steps;
 uint16_t ex_initial_pos, em_initial_pos;
@@ -248,14 +254,14 @@ main() {
 //	enum Command cmd;
 //   enum Status status;
 
-   byte_t i, k, clientCmd, rx_bytes;
+   byte_t i, k, clientCmd;
    byte_t csumm;
 //	byte_t gain, accm_num;
    byte_t* temp;
 
    int result;
    uint16_t n, val;
-   uint16_t tx_bytes;
+   uint16_t tx_bytes, rx_bytes;
    uint16_t summ_of_ex_stp, summ_of_em_stp;
 
    ulong32_t var_temp;
@@ -263,12 +269,14 @@ main() {
    //exitation and emission steps size in step motor's microsteps
    pointsPrm_t rg_measPar;
 
+   clear((byte_t*)&tx_mssg, sizeof(tx_mssg));
    strncpy(tx_mssg.rsp.head, head, sizeof(head));
 //   tx_mssg.msgsize = 1;
 //   tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
 
    clear(rx_mssg, MAX_RX_SIZE);
-   clear((byte_t*)&main_data, (MAXPOINTS << 1));
+   n = (MAXSIZE << 1);
+   clear((byte_t*)&main_data, n);
 	clear((byte_t*)&ref_data, (MAX_DATA_POINTS << 1));
 
 	for (; ;)
@@ -297,8 +305,8 @@ main() {
 //Check message head
 				result = strncmp(rx_mssg, head, sizeof(head));
             if (result != 0){
-            	tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
-
+            	tx_mssg.rsp.stt = (byte_t)ERROR;
+               tx_mssg.rsp.ercode = (byte_t)CTX_ERR;
                clear(rx_mssg, MAX_RX_SIZE);
                CoBegin(&Transmit);
             }
@@ -329,15 +337,17 @@ main() {
             	printf("Exec is running.\n");
 #endif
 //Calculate persentage for Execution
-					tx_mssg.rsp.msgsize = 2;
                var_temp = (ulong32_t)num_of_steps_exec * 100;
 					executed = (byte_t)(var_temp / num_of_steps);
-					tx_mssg.respond[ST_OFFSET] = (byte_t)BUSY;
+
+					tx_mssg.rsp.stt = (byte_t)BUSY;
+               tx_mssg.rsp.msgsize = 1;
                tx_mssg.respond[SERVICE_BYTES] = executed;
+
+               CoBegin(&Transmit);
             }
             else {
-            	tx_mssg.rsp.msgsize = 2;
-					tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
+					tx_mssg.rsp.stt = (byte_t)OK;
 				}
            break;
            case (byte_t)SET_PARAMS:
@@ -345,19 +355,19 @@ main() {
 				printf("Command SET_PARAMS.\n");
 #endif
 //Check cs first, start from command
-            csumm = calcCS(&rx_mssg[CMD_OFFSET], (rx_bytes - SERVICE_BYTES));
+            csumm = calcCS(&rx_mssg[BODY_OFFSET], (rx_bytes - SERVICE_BYTES - 1));
             if ((csumm ^ rx_mssg[rx_bytes - 1]) == 0){
-	            memcpy((byte_t*)&params, &rx_mssg[CMD_OFFSET + 1],
+	            memcpy((byte_t*)&params, &rx_mssg[BODY_OFFSET],
                		(sizeof(params) - sizeof(params.points)));
-					memcpy((byte_t*)&params.points, &rx_mssg[CMD_OFFSET + (sizeof(params)
-               		- sizeof(params.points)) + 1], sizeof(params.points));
+					memcpy((byte_t*)&params.points, &rx_mssg[BODY_OFFSET + (sizeof(params)
+               		- sizeof(params.points))], sizeof(params.points));
 
 //               gain = params.gain;
                if (params.accumulation != ACCM_8 && params.accumulation != ACCM_32 &&
                	params.accumulation != ACCM_64 && params.accumulation != ACCM_128){
-            		tx_mssg.rsp.msgsize = 1;
-						tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
-
+//            		tx_mssg.rsp.msgsize = 1;
+						tx_mssg.rsp.stt = (byte_t)ERROR;
+                  tx_mssg.rsp.ercode = PRM_ERR;
                	clear(rx_mssg, MAX_RX_SIZE);
                	CoBegin(&Transmit);
                   CoReset(&Decode);
@@ -385,9 +395,9 @@ main() {
 #ifdef   PRINTABLE
 	            	printf(" params.ex_log_steps = 0.\n");
 #endif
-            		tx_mssg.rsp.msgsize = 1;
-						tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
-
+//            		tx_mssg.rsp.msgsize = 1;
+						tx_mssg.rsp.stt = (byte_t)ERROR;
+                  tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
                	clear(rx_mssg, MAX_RX_SIZE);
                	CoBegin(&Transmit);
                   CoReset(&Decode);
@@ -408,13 +418,14 @@ main() {
 #ifdef   PRINTABLE
 	            	printf(" params.em_log_steps = 0.\n");
 #endif
-            		tx_mssg.rsp.msgsize = 1;
-						tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
-
+//            		tx_mssg.rsp.msgsize = 1;
+						tx_mssg.rsp.stt = (byte_t)ERROR;
+                  tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
                	clear(rx_mssg, MAX_RX_SIZE);
                	CoBegin(&Transmit);
                   CoReset(&Decode);
 					}
+               summ_of_ex_stp = summ_of_em_stp = 0;
                for (k = 0; k < params.nmb_of_regions; ++k){
                	summ_of_ex_stp += params.points[k].ex_steps;
                	summ_of_em_stp += params.points[k].em_steps;
@@ -427,9 +438,9 @@ main() {
 	            	printf("Number of steps a = %d (%4x) more than MAXSIZE.\n",
                   		num_of_steps, num_of_steps);
 #endif
-            		tx_mssg.rsp.msgsize = 1;
-						tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
-
+//            		tx_mssg.rsp.msgsize = 1;
+						tx_mssg.rsp.stt = (byte_t)ERROR;
+                  tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
                	clear(rx_mssg, MAX_RX_SIZE);
                	CoBegin(&Transmit);
                   CoReset(&Decode);
@@ -446,12 +457,15 @@ main() {
                printf("Step size for Em n = %d (%4x).\n", rg_measPar.em_stp_size,
                			rg_measPar.em_stp_size);
 #endif
-	            tx_mssg.rsp.msgsize = 1;
-	            tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
+//	            tx_mssg.rsp.msgsize = 1;
+	            tx_mssg.rsp.stt = (byte_t)OK;
+               gFlags &=~(FLG_NO_PARMS);
+               gFlags |= FLG_NO_DATA;
             }
             else {
-            	tx_mssg.rsp.msgsize = 1;
-					tx_mssg.respond[ST_OFFSET] = (byte_t)ERROR;
+					tx_mssg.rsp.stt = (byte_t)ERROR;
+               tx_mssg.rsp.msgsize = 1;
+               tx_mssg.rsp.ercode = (byte_t)CS_ERR;
 
                clear(rx_mssg, MAX_RX_SIZE);
                CoBegin(&Transmit);
@@ -461,47 +475,65 @@ main() {
 #ifdef	PRINTABLE
 				printf("Command START_MEASURE.\n");
 #endif
-				tx_mssg.rsp.msgsize = 1;
-				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
+				if ((gFlags & FLG_NO_PARMS) != FLG_NO_PARMS){
+//	            tx_mssg.rsp.msgsize = 1;
+	            tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
 
-            CoBegin(&Exec);
+	            CoBegin(&Exec);
+            }
+            else {
+					tx_mssg.rsp.stt = (byte_t)ERROR;
+               tx_mssg.rsp.msgsize = 1;
+               tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
+
+               clear(rx_mssg, MAX_RX_SIZE);
+               CoBegin(&Transmit);
+            }
            break;
         	  case (byte_t)GET_DATA:
 #ifdef	PRINTABLE
 				printf("Command GET_DATA.\n");
 #endif
-				temp = &tx_mssg.respond[RSP_OFFSET];
-            if (rg_measPar.num_of_ex_stp ==0 && rg_measPar.num_of_em_stp == 0){
-					*temp = (byte_t)(main_data[0] >> 8);
-	            ++temp;
-	            *temp = (byte_t)main_data[0];
-	            ++temp;
-	            *temp = (byte_t)(ref_data[0] >> 8);
-	            ++temp;
-	            *temp = (byte_t)ref_data[0];
-	            ++temp;
-               val = 4;
-            }
-            else {
-	            for (i = 0; i < rg_measPar.num_of_ex_stp; ++i){
-	               for (k = 0; k < rg_measPar.num_of_em_stp; ++k){
-	                  *temp = (byte_t)(main_data[i * rg_measPar.num_of_em_stp + k] >> 8);
+	         if ((gFlags & FLG_NO_DATA) != FLG_NO_DATA){
+	            temp = &tx_mssg.respond[BODY_OFFSET];
+	            if (rg_measPar.num_of_ex_stp ==0 && rg_measPar.num_of_em_stp == 0){
+	               *temp = (byte_t)(main_data[0] >> 8);
+	               ++temp;
+	               *temp = (byte_t)main_data[0];
+	               ++temp;
+	               *temp = (byte_t)(ref_data[0] >> 8);
+	               ++temp;
+	               *temp = (byte_t)ref_data[0];
+	               ++temp;
+	               val = 4;
+	            }
+	            else {
+	               for (i = 0; i < rg_measPar.num_of_ex_stp; ++i){
+	                  for (k = 0; k < rg_measPar.num_of_em_stp; ++k){
+	                     *temp = (byte_t)(main_data[i * rg_measPar.num_of_em_stp + k] >> 8);
+	                     ++temp;
+	                     *temp = (byte_t)main_data[i * rg_measPar.num_of_em_stp + k];
+	                     ++temp;
+	                  }
+	                  *temp = (byte_t)(ref_data[i] >> 8);
 	                  ++temp;
-	                  *temp = (byte_t)main_data[i * rg_measPar.num_of_em_stp + k];
+	                  *temp = (byte_t)ref_data[i];
 	                  ++temp;
 	               }
-	               *temp = (byte_t)(ref_data[i] >> 8);
-	               ++temp;
-	               *temp = (byte_t)ref_data[i];
-	               ++temp;
+	               val = (uint16_t)(rg_measPar.num_of_ex_stp) * (uint16_t)(rg_measPar.num_of_em_stp + 1);
 	            }
-	            val = (uint16_t)(rg_measPar.num_of_ex_stp) * (uint16_t)(rg_measPar.num_of_em_stp + 1);
-            }
-//Add one byte to CS
-				tx_mssg.rsp.msgsize = val + 1;
-				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
-            *temp = calcCS(&tx_mssg.respond[SERVICE_BYTES], val);
-            CoBegin(&Transmit);
+	//Add one byte to CS
+	            tx_mssg.rsp.msgsize = val + 1;
+	            tx_mssg.respond[ST_OFFSET] = (byte_t)DATA;
+	            *temp = calcCS(&tx_mssg.respond[SERVICE_BYTES], val);
+	         }
+	         else {
+					tx_mssg.rsp.stt = (byte_t)ERROR;
+               tx_mssg.rsp.msgsize = 1;
+               tx_mssg.rsp.ercode = (byte_t)CTX_ERR;
+               clear(rx_mssg, MAX_RX_SIZE);
+	         }
+//            CoBegin(&Transmit);
            break;
            case (byte_t)STOP_MEASURE:
 #ifdef	PRINTABLE
@@ -519,14 +551,18 @@ main() {
 	         waitfor (isPositionSet(FIRST, ex_target_pos));
 	         waitfor (isPositionSet(SECOND, em_target_pos));
 
-				tx_mssg.rsp.msgsize = 1;
+//				tx_mssg.rsp.msgsize = 1;
 				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
-            CoBegin(&Transmit);
+//            CoBegin(&Transmit);
            break;
            default:
 #ifdef	PRINTABLE
 				printf("Command doesn't found!\n");
 #endif
+					tx_mssg.rsp.stt = (byte_t)ERROR;
+               tx_mssg.rsp.msgsize = 1;
+               tx_mssg.rsp.ercode = (byte_t)CMD_ERR;
+               clear(rx_mssg, MAX_RX_SIZE);
          }
 			CoPause(&Recieve);
          CoBegin(&Transmit);
@@ -536,36 +572,38 @@ main() {
 #ifdef	PRINTABLE
 			printf("Transmit state.\n");
 #endif
-         if (rx_bytes > 0){
-         	if (clientCmd == GET_DATA)
-            	tx_bytes = MIN_RESPOND_SIZE + val + 1;
-            else if (tx_mssg.rsp.msgsize == 2){
-            	tx_bytes = MIN_RESPOND_SIZE + 1;
-            }
-            else
-	            tx_bytes = MIN_RESPOND_SIZE;
-#ifdef	PRINTABLE_MO
-				for (n = 0; n < tx_bytes; ++n){
-            	printf("0x%2x.\n",tx_mssg.respond[n]);
-            }
-#endif
-  		   	wfd cof_serCwrite(tx_mssg.respond, tx_bytes);
+         rx_bytes = 0;
+         if ((GET_DATA == clientCmd) &&
+         		(FLG_NO_DATA != (gFlags & FLG_NO_DATA)))
+            tx_bytes = MIN_RESPOND_SIZE + val + 1;
+         else if (tx_mssg.rsp.msgsize == 1){
+//Send error code to client
+            tx_bytes = MIN_RESPOND_SIZE + 1;
          }
+         else
+            tx_bytes = MIN_RESPOND_SIZE;
+
+#ifdef   PRINTABLE_MO
+         for (n = 0; n < tx_bytes; ++n){
+            printf("0x%2x.\n",tx_mssg.respond[n]);
+         }
+#endif
+         wfd cof_serCwrite(tx_mssg.respond, tx_bytes);
 
   		   tx_bytes = 0;
+         clear((byte_t*)&tx_mssg.rsp.stt, (sizeof(tx_mssg.rsp) - sizeof(tx_mssg.rsp.head)));
 			CoResume(&Recieve);
 	   } 	//end transmit costate
 
 		costate Exec{		// execute
-   		CoPause(&Recieve);
+   //		CoPause(&Recieve);
 
 #ifdef	PRINTABLE
 			printf("Start execution\n");
 #endif
-			tx_mssg.rsp.msgsize = 1;
-			tx_mssg.respond[ST_OFFSET] = (byte_t)BUSY;
+//			tx_mssg.respond[ST_OFFSET] = (byte_t)BUSY;
 
-  		   CoBegin(&Transmit);
+//  		   CoBegin(&Transmit);
 // Main execution programm
          for (k = 0; k < params.nmb_of_regions; ++k){
 	         ex_target_pos += (params.points[k].ex_start_p * rg_measPar.ex_stp_size);
@@ -588,9 +626,10 @@ main() {
          }
 
          CoResume(&Exec);
-
-			tx_mssg.rsp.msgsize = 1;
-			tx_mssg.respond[ST_OFFSET] = (byte_t)DATA_READY;
+         gFlags &= ~(FLG_NO_DATA);
+//         gFlags |= FLG_DATA_RDY;
+//			tx_mssg.rsp.msgsize = 1;
+			tx_mssg.rsp.stt = (byte_t)DATA_READY;
 
   		   CoBegin(&Transmit);
    	}		//end exec costate
@@ -617,7 +656,7 @@ cofunc int Dev_Init()
 	initPorts();
    //All output pins - low
 	WrPortE(OUT,&OUTShadow,0x00);
-
+   gFlags = FLG_NO_PARMS + FLG_NO_DATA;
 #ifdef	PRINTABLE
 	printf("Reset motors start.\n");
 #endif
