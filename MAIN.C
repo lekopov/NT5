@@ -137,9 +137,14 @@
 #define	SOFTSTOP				0x8f	//motor stop with deceleration phase
 
 // Motor parameters for Narciss
+/* 07.02.2015 L.P. define new params to motor  * /
 #define	VMAX			0x0e	//index 14 grupp D 726 FS/s (11658 1/16 microsteps)
 #define	VMIN        0x0c	//index 12 271 FS/s
 #define	ACC			0x08	//was a,index 10 acceleration 21886 FS/s2
+*/
+#define	VMAX			0x0c  //456
+#define	VMIN        0x0f  //214
+#define	ACC			0x0f	//40047
 #define	IRUN			0x08	//8 238mA	for new P21h4aa motors 09.11.2005
 #define	IHOLD			0x00	//59mA
 
@@ -260,7 +265,7 @@ main() {
    byte_t* temp;
 
    int result;
-   uint16_t n, val;
+   uint16_t n, prm_length, val;
    uint16_t tx_bytes, rx_bytes;
    uint16_t summ_of_ex_stp, summ_of_em_stp;
 
@@ -306,8 +311,9 @@ main() {
 				result = strncmp(rx_mssg, head, sizeof(head));
             if (result != 0){
             	tx_mssg.rsp.stt = (byte_t)ERROR;
+               tx_mssg.rsp.msgsize = 1;
                tx_mssg.rsp.ercode = (byte_t)CTX_ERR;
-               clear(rx_mssg, MAX_RX_SIZE);
+
                CoBegin(&Transmit);
             }
             else {
@@ -326,6 +332,18 @@ main() {
 			printf("Decode state.\n");
 #endif
 			clientCmd = rx_mssg[CMD_OFFSET];
+
+         if (isCoRunning(&Exec) && ((clientCmd != (byte_t)GET_STATUS) &&
+         							(clientCmd != (byte_t)STOP_MEASURE))){
+            tx_mssg.rsp.stt = (byte_t)ERROR;
+            tx_mssg.rsp.msgsize = 1;
+            tx_mssg.rsp.ercode = CTX_ERR;
+
+            CoReset(&Decode);
+            CoBegin(&Transmit);
+            yield;
+          }
+
          switch (clientCmd)
          {
            case (byte_t)GET_STATUS:
@@ -354,21 +372,21 @@ main() {
 #ifdef	PRINTABLE
 				printf("Command SET_PARAMS.\n");
 #endif
-//Check cs first, start from command
-            csumm = calcCS(&rx_mssg[BODY_OFFSET], (rx_bytes - SERVICE_BYTES - 1));
+//Check cs first, start from params body
+				prm_length = rx_bytes - SERVICE_BYTES - 1;
+            csumm = calcCS(&rx_mssg[BODY_OFFSET], prm_length);
             if ((csumm ^ rx_mssg[rx_bytes - 1]) == 0){
-	            memcpy((byte_t*)&params, &rx_mssg[BODY_OFFSET],
-               		(sizeof(params) - sizeof(params.points)));
-					memcpy((byte_t*)&params.points, &rx_mssg[BODY_OFFSET + (sizeof(params)
-               		- sizeof(params.points))], sizeof(params.points));
+	            memcpy((byte_t*)&params, &rx_mssg[BODY_OFFSET], prm_length);
+//               		(sizeof(params) - sizeof(params.points)));
+//					memcpy((byte_t*)&params.points, &rx_mssg[BODY_OFFSET + (sizeof(params)
+//               		- sizeof(params.points))], sizeof(params.points));
 
-//               gain = params.gain;
                if (params.accumulation != ACCM_8 && params.accumulation != ACCM_32 &&
                	params.accumulation != ACCM_64 && params.accumulation != ACCM_128){
-//            		tx_mssg.rsp.msgsize = 1;
 						tx_mssg.rsp.stt = (byte_t)ERROR;
+                  tx_mssg.rsp.msgsize = 1;
                   tx_mssg.rsp.ercode = PRM_ERR;
-               	clear(rx_mssg, MAX_RX_SIZE);
+
                	CoBegin(&Transmit);
                   CoReset(&Decode);
                }
@@ -395,10 +413,10 @@ main() {
 #ifdef   PRINTABLE
 	            	printf(" params.ex_log_steps = 0.\n");
 #endif
-//            		tx_mssg.rsp.msgsize = 1;
 						tx_mssg.rsp.stt = (byte_t)ERROR;
+						tx_mssg.rsp.msgsize = 1;
                   tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
-               	clear(rx_mssg, MAX_RX_SIZE);
+
                	CoBegin(&Transmit);
                   CoReset(&Decode);
 					}
@@ -418,10 +436,10 @@ main() {
 #ifdef   PRINTABLE
 	            	printf(" params.em_log_steps = 0.\n");
 #endif
-//            		tx_mssg.rsp.msgsize = 1;
 						tx_mssg.rsp.stt = (byte_t)ERROR;
+                  tx_mssg.rsp.msgsize = 1;
                   tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
-               	clear(rx_mssg, MAX_RX_SIZE);
+
                	CoBegin(&Transmit);
                   CoReset(&Decode);
 					}
@@ -438,10 +456,10 @@ main() {
 	            	printf("Number of steps a = %d (%4x) more than MAXSIZE.\n",
                   		num_of_steps, num_of_steps);
 #endif
-//            		tx_mssg.rsp.msgsize = 1;
 						tx_mssg.rsp.stt = (byte_t)ERROR;
+                  tx_mssg.rsp.msgsize = 1;
                   tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
-               	clear(rx_mssg, MAX_RX_SIZE);
+
                	CoBegin(&Transmit);
                   CoReset(&Decode);
                }
@@ -467,8 +485,7 @@ main() {
                tx_mssg.rsp.msgsize = 1;
                tx_mssg.rsp.ercode = (byte_t)CS_ERR;
 
-               clear(rx_mssg, MAX_RX_SIZE);
-               CoBegin(&Transmit);
+//               CoBegin(&Transmit);
             }
            break;
            case (byte_t)START_MEASURE:
@@ -476,8 +493,7 @@ main() {
 				printf("Command START_MEASURE.\n");
 #endif
 				if ((gFlags & FLG_NO_PARMS) != FLG_NO_PARMS){
-//	            tx_mssg.rsp.msgsize = 1;
-	            tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
+	            tx_mssg.rsp.stt = (byte_t)OK;
 
 	            CoBegin(&Exec);
             }
@@ -486,8 +502,7 @@ main() {
                tx_mssg.rsp.msgsize = 1;
                tx_mssg.rsp.ercode = (byte_t)PRM_ERR;
 
-               clear(rx_mssg, MAX_RX_SIZE);
-               CoBegin(&Transmit);
+//               CoBegin(&Transmit);
             }
            break;
         	  case (byte_t)GET_DATA:
@@ -496,6 +511,10 @@ main() {
 #endif
 	         if ((gFlags & FLG_NO_DATA) != FLG_NO_DATA){
 	            temp = &tx_mssg.respond[BODY_OFFSET];
+//Send meas parameters first
+					memcpy(temp, (byte_t*)&params, prm_length);
+               temp += prm_length;
+
 	            if (rg_measPar.num_of_ex_stp ==0 && rg_measPar.num_of_em_stp == 0){
 	               *temp = (byte_t)(main_data[0] >> 8);
 	               ++temp;
@@ -520,18 +539,19 @@ main() {
 	                  *temp = (byte_t)ref_data[i];
 	                  ++temp;
 	               }
-	               val = (uint16_t)(rg_measPar.num_of_ex_stp) * (uint16_t)(rg_measPar.num_of_em_stp + 1);
+	               val = (uint16_t)(rg_measPar.num_of_ex_stp + 1) * (uint16_t)(rg_measPar.num_of_em_stp);
+                  val <<= 1;
 	            }
-	//Add one byte to CS
-	            tx_mssg.rsp.msgsize = val + 1;
-	            tx_mssg.respond[ST_OFFSET] = (byte_t)DATA;
-	            *temp = calcCS(&tx_mssg.respond[SERVICE_BYTES], val);
+	            tx_mssg.rsp.msgsize = prm_length + val;
+	            tx_mssg.rsp.stt = (byte_t)DATA;
+	            *temp = calcCS(&tx_mssg.respond[BODY_OFFSET], tx_mssg.rsp.msgsize);
+//Add one byte to CS
+               ++tx_mssg.rsp.msgsize;
 	         }
 	         else {
 					tx_mssg.rsp.stt = (byte_t)ERROR;
                tx_mssg.rsp.msgsize = 1;
                tx_mssg.rsp.ercode = (byte_t)CTX_ERR;
-               clear(rx_mssg, MAX_RX_SIZE);
 	         }
 //            CoBegin(&Transmit);
            break;
@@ -551,7 +571,6 @@ main() {
 	         waitfor (isPositionSet(FIRST, ex_target_pos));
 	         waitfor (isPositionSet(SECOND, em_target_pos));
 
-//				tx_mssg.rsp.msgsize = 1;
 				tx_mssg.respond[ST_OFFSET] = (byte_t)OK;
 //            CoBegin(&Transmit);
            break;
@@ -562,7 +581,6 @@ main() {
 					tx_mssg.rsp.stt = (byte_t)ERROR;
                tx_mssg.rsp.msgsize = 1;
                tx_mssg.rsp.ercode = (byte_t)CMD_ERR;
-               clear(rx_mssg, MAX_RX_SIZE);
          }
 			CoPause(&Recieve);
          CoBegin(&Transmit);
@@ -573,6 +591,8 @@ main() {
 			printf("Transmit state.\n");
 #endif
          rx_bytes = 0;
+         clear(rx_mssg, MAX_RX_SIZE);
+
          if ((GET_DATA == clientCmd) &&
          		(FLG_NO_DATA != (gFlags & FLG_NO_DATA)))
             tx_bytes = MIN_RESPOND_SIZE + val + 1;
@@ -627,8 +647,6 @@ main() {
 
          CoResume(&Exec);
          gFlags &= ~(FLG_NO_DATA);
-//         gFlags |= FLG_DATA_RDY;
-//			tx_mssg.rsp.msgsize = 1;
 			tx_mssg.rsp.stt = (byte_t)DATA_READY;
 
   		   CoBegin(&Transmit);
@@ -779,12 +797,6 @@ cofunc int Reset_m[2](byte_t mot)
 	readMotorStatus(GETFULLSTATUS1, motorAddr, status);
 	readMotorStatus(GETFULLSTATUS2, motorAddr, status);
 	send_TMC_Command((TMC_ADDR | motorAddr), RESETPOS);
-/*
-//Reset encoder
-	    BitWrPortE(OUT, &OUTShadow, 0, EM_ENC_NRES);
-	    BitWrPortE(OUT, &OUTShadow, 1, EM_ENC_NRES);
-*/
-//   readMotorStatus(GETFULLSTATUS2, motorAddr, status);
 
 	return 1;
 }
